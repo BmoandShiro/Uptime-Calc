@@ -62,45 +62,181 @@ Write-Host "=========================================="
 Write-Host "Analysis Period: $startDate to $endDate"
 Write-Host ""
 
-$eventsFile = "$env:TEMP\events.txt"
-if (-not (Test-Path $eventsFile)) {
-    Write-Host "Events file not found. Generating from Windows Event Log..."
-    Write-Host "This may take a few moments..."
-    wevtutil qe System /c:1000 /rd:true /f:text /q:"*[System[(EventID=6005 or EventID=6006 or EventID=6008 or EventID=6009)]]" | Out-File -FilePath $eventsFile -Encoding UTF8
-    if (-not (Test-Path $eventsFile)) {
-        Write-Host "Error: Could not generate events file. Please ensure you have administrator privileges."
+# Query events using PowerShell Get-WinEvent (more reliable with date filtering)
+Write-Host "Querying Windows Event Log for boot/shutdown events..."
+Write-Host "This may take a few moments..." -ForegroundColor Yellow
+Write-Host ""
+
+try {
+    # Query all boot/shutdown events to find the actual date range
+    # First, get newest events to find the latest date
+    Write-Host "Scanning Event Log for available data range..." -ForegroundColor Cyan
+    $newestEvents = Get-WinEvent -FilterHashtable @{
+        LogName = 'System'
+        ID = 6005, 6006, 6008, 6009
+    } -MaxEvents 1 -ErrorAction SilentlyContinue
+    
+    if ($null -eq $newestEvents -or $newestEvents.Count -eq 0) {
+        Write-Host "No boot/shutdown events found in Event Log." -ForegroundColor Red
+        Write-Host "Checking current session uptime..."
+        $lastBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+        $currentUptime = (Get-Date) - $lastBoot
+        Write-Host "Current uptime: $($currentUptime.Days) days, $($currentUptime.Hours) hours, $($currentUptime.Minutes) minutes"
+        Write-Host "Last boot: $lastBoot"
         Write-Host ""
         Write-Host "Press any key to exit..."
         $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-        exit 1
+        exit
     }
-    Write-Host "Events file generated successfully."
-    Write-Host ""
-}
-
-# Parse events from file
-$events = @()
-$content = Get-Content $eventsFile -Raw
-$eventBlocks = $content -split 'Event\['
-
-foreach ($block in $eventBlocks) {
-    if ($block -match 'Event ID: (\d+)') {
-        $eventId = [int]$matches[1]
-        if ($block -match 'Date: ([0-9TZ:.-]+)') {
-            $dateStr = $matches[1]
-            if ($eventId -in @(6005, 6006, 6008, 6009)) {
-                try {
-                    $eventDate = [DateTime]::Parse($dateStr)
-                    if ($eventDate -ge $startDate -and $eventDate -le $endDate) {
-                        $events += [PSCustomObject]@{
-                            EventID = $eventId
-                            TimeCreated = $eventDate
-                        }
-                    }
-                } catch {
-                    # Skip invalid dates
+    
+    $newestEvent = $newestEvents[0].TimeCreated
+    
+    # Now query with Oldest parameter to find the oldest event
+    # Get-WinEvent returns newest first, so we need to get a large sample and find the oldest
+    Write-Host "Querying all available boot/shutdown events (this may take a moment)..." -ForegroundColor Cyan
+    $allEvents = Get-WinEvent -FilterHashtable @{
+        LogName = 'System'
+        ID = 6005, 6006, 6008, 6009
+    } -ErrorAction SilentlyContinue
+    
+    if ($null -eq $allEvents -or $allEvents.Count -eq 0) {
+        Write-Host "No boot/shutdown events found in Event Log." -ForegroundColor Red
+        Write-Host "Checking current session uptime..."
+        $lastBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+        $currentUptime = (Get-Date) - $lastBoot
+        Write-Host "Current uptime: $($currentUptime.Days) days, $($currentUptime.Hours) hours, $($currentUptime.Minutes) minutes"
+        Write-Host "Last boot: $lastBoot"
+        Write-Host ""
+        Write-Host "Press any key to exit..."
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        exit
+    }
+    
+    Write-Host "Found $($allEvents.Count) total boot/shutdown events in Event Log" -ForegroundColor Green
+    
+    # Find the oldest event by checking all events
+    $oldestEvent = $null
+    $parsedEvents = @()
+    
+    foreach ($evt in $allEvents) {
+        $eventDate = $evt.TimeCreated
+        if ($null -eq $oldestEvent -or $eventDate -lt $oldestEvent) {
+            $oldestEvent = $eventDate
+        }
+        
+        $parsedEvents += [PSCustomObject]@{
+            EventID = $evt.Id
+            TimeCreated = $eventDate
+        }
+    }
+    
+    # Update newest event from all events (in case first query missed it)
+    foreach ($evt in $allEvents) {
+        if ($evt.TimeCreated -gt $newestEvent) {
+            $newestEvent = $evt.TimeCreated
+        }
+    }
+    
+    # Check Event Log retention policy
+    try {
+        $logInfo = Get-WinEvent -ListLog System -ErrorAction SilentlyContinue
+        if ($logInfo) {
+            Write-Host "Event Log Info:" -ForegroundColor Cyan
+            Write-Host "  Maximum Size: $([math]::Round($logInfo.MaximumSizeInBytes / 1MB, 2)) MB"
+            Write-Host "  Retention Policy: $($logInfo.LogMode)"
+            if ($logInfo.OldestRecordTime) {
+                Write-Host "  Oldest Record in Log: $($logInfo.OldestRecordTime)" -ForegroundColor Yellow
+                if ($logInfo.OldestRecordTime -lt $oldestEvent) {
+                    Write-Host "  NOTE: Log contains older records, but boot/shutdown events may not go back that far" -ForegroundColor Yellow
                 }
             }
+        }
+    } catch {
+        # Ignore errors getting log info
+    }
+    
+    Write-Host ""
+    
+    # Check if requested time frame exceeds available data
+    $availableDays = ($newestEvent - $oldestEvent).TotalDays
+    if ($days -gt $availableDays) {
+        Write-Host "WARNING: Requested $days days, but only $([math]::Round($availableDays, 1)) days of boot/shutdown data available." -ForegroundColor Yellow
+        Write-Host "Available data range: $oldestEvent to $newestEvent" -ForegroundColor Yellow
+        Write-Host "This is likely due to Windows Event Log retention policy (typically 1 year or less)." -ForegroundColor Yellow
+        Write-Host "Analysis will be limited to available data." -ForegroundColor Yellow
+        Write-Host ""
+    }
+    
+    # Filter events to requested date range
+    $events = $parsedEvents | Where-Object { 
+        $_.TimeCreated -ge $startDate -and $_.TimeCreated -le $endDate 
+    }
+    
+} catch {
+    Write-Host "Error querying Event Log: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Attempting fallback method with wevtutil..." -ForegroundColor Yellow
+    Write-Host ""
+    
+    # Fallback to wevtutil method
+    $eventsFile = "$env:TEMP\events.txt"
+    if (-not (Test-Path $eventsFile)) {
+        Write-Host "Generating events file from Windows Event Log..."
+        Write-Host "This may take a few moments..."
+        wevtutil qe System /c:10000 /rd:true /f:text /q:"*[System[(EventID=6005 or EventID=6006 or EventID=6008 or EventID=6009)]]" | Out-File -FilePath $eventsFile -Encoding UTF8
+        if (-not (Test-Path $eventsFile)) {
+            Write-Host "Error: Could not generate events file. Please ensure you have administrator privileges." -ForegroundColor Red
+            Write-Host ""
+            Write-Host "Press any key to exit..."
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            exit 1
+        }
+        Write-Host "Events file generated successfully."
+        Write-Host ""
+    }
+    
+    # Parse events from file
+    $events = @()
+    $content = Get-Content $eventsFile -Raw
+    $eventBlocks = $content -split 'Event\['
+    $oldestEvent = $null
+    $newestEvent = $null
+    
+    foreach ($block in $eventBlocks) {
+        if ($block -match 'Event ID: (\d+)') {
+            $eventId = [int]$matches[1]
+            if ($block -match 'Date: ([0-9TZ:.-]+)') {
+                $dateStr = $matches[1]
+                if ($eventId -in @(6005, 6006, 6008, 6009)) {
+                    try {
+                        $eventDate = [DateTime]::Parse($dateStr)
+                        if ($null -eq $oldestEvent -or $eventDate -lt $oldestEvent) {
+                            $oldestEvent = $eventDate
+                        }
+                        if ($null -eq $newestEvent -or $eventDate -gt $newestEvent) {
+                            $newestEvent = $eventDate
+                        }
+                        if ($eventDate -ge $startDate -and $eventDate -le $endDate) {
+                            $events += [PSCustomObject]@{
+                                EventID = $eventId
+                                TimeCreated = $eventDate
+                            }
+                        }
+                    } catch {
+                        # Skip invalid dates
+                    }
+                }
+            }
+        }
+    }
+    
+    # Check if requested time frame exceeds available data (fallback method)
+    if ($null -ne $oldestEvent -and $null -ne $newestEvent) {
+        $availableDays = ($newestEvent - $oldestEvent).TotalDays
+        if ($days -gt $availableDays) {
+            Write-Host "WARNING: Requested $days days, but only $([math]::Round($availableDays, 1)) days of data available in Event Log." -ForegroundColor Yellow
+            Write-Host "Available data range: $oldestEvent to $newestEvent" -ForegroundColor Yellow
+            Write-Host "Analysis will be limited to available data." -ForegroundColor Yellow
+            Write-Host ""
         }
     }
 }
@@ -121,7 +257,22 @@ if ($events.Count -eq 0) {
 # Sort events by time
 $sortedEvents = $events | Sort-Object TimeCreated
 
-Write-Host "Found $($sortedEvents.Count) boot/shutdown events in the last $days days"
+# Calculate actual date range of found events
+$actualStartDate = $null
+$actualEndDate = $null
+if ($sortedEvents.Count -gt 0) {
+    $actualStartDate = ($sortedEvents | Measure-Object -Property TimeCreated -Minimum).Minimum
+    $actualEndDate = ($sortedEvents | Measure-Object -Property TimeCreated -Maximum).Maximum
+    $actualDays = ($actualEndDate - $actualStartDate).TotalDays
+}
+
+Write-Host "Found $($sortedEvents.Count) boot/shutdown events"
+if ($null -ne $actualStartDate -and $null -ne $actualEndDate) {
+    Write-Host "Event date range: $actualStartDate to $actualEndDate"
+    if ($actualDays -lt $days) {
+        Write-Host "Note: Only $([math]::Round($actualDays, 1)) days of data available (requested $days days)" -ForegroundColor Yellow
+    }
+}
 Write-Host ""
 
 # Calculate total uptime
@@ -172,7 +323,19 @@ Write-Host "  Minutes: $($totalUptime.Minutes)"
 Write-Host "  Total Hours: $([math]::Round($totalUptime.TotalHours, 2))"
 Write-Host "  Total Days: $([math]::Round($totalUptime.TotalDays, 2))"
 Write-Host ""
-Write-Host "Uptime Percentage: $([math]::Round(($totalUptime.TotalDays / $days) * 100, 2))%"
+# Calculate percentage based on actual available days
+$daysForPercentage = $days
+if ($null -ne $actualStartDate -and $null -ne $actualEndDate) {
+    $actualDays = ($actualEndDate - $actualStartDate).TotalDays
+    if ($actualDays -lt $days) {
+        $daysForPercentage = $actualDays
+        Write-Host "Uptime Percentage (based on $([math]::Round($actualDays, 1)) days of available data): $([math]::Round(($totalUptime.TotalDays / $daysForPercentage) * 100, 2))%" -ForegroundColor Yellow
+    } else {
+        Write-Host "Uptime Percentage: $([math]::Round(($totalUptime.TotalDays / $days) * 100, 2))%"
+    }
+} else {
+    Write-Host "Uptime Percentage: $([math]::Round(($totalUptime.TotalDays / $days) * 100, 2))%"
+}
 Write-Host "=========================================="
 Write-Host ""
 Write-Host "Press any key to exit..."
