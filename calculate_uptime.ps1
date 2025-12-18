@@ -137,19 +137,42 @@ try {
         }
     }
     
-    # Check Event Log retention policy
+    # Check Event Log retention policy and explain limitations
     try {
         $logInfo = Get-WinEvent -ListLog System -ErrorAction SilentlyContinue
         if ($logInfo) {
-            Write-Host "Event Log Info:" -ForegroundColor Cyan
+            Write-Host "Event Log Configuration:" -ForegroundColor Cyan
             Write-Host "  Maximum Size: $([math]::Round($logInfo.MaximumSizeInBytes / 1MB, 2)) MB"
-            Write-Host "  Retention Policy: $($logInfo.LogMode)"
+            
+            # Explain retention policy
+            $retentionExplanation = switch ($logInfo.LogMode) {
+                "Circular" { "Overwrites oldest events when log is full (default - limits retention)" }
+                "AutoBackup" { "Archives log when full, then starts new log" }
+                "Retain" { "Stops logging when full (requires manual clearing)" }
+                default { $logInfo.LogMode }
+            }
+            Write-Host "  Retention Policy: $($logInfo.LogMode) - $retentionExplanation" -ForegroundColor Yellow
+            
             if ($logInfo.OldestRecordTime) {
-                Write-Host "  Oldest Record in Log: $($logInfo.OldestRecordTime)" -ForegroundColor Yellow
-                if ($logInfo.OldestRecordTime -lt $oldestEvent) {
-                    Write-Host "  NOTE: Log contains older records, but boot/shutdown events may not go back that far" -ForegroundColor Yellow
+                $oldestInLog = $logInfo.OldestRecordTime
+                $daysInLog = ((Get-Date) - $oldestInLog).TotalDays
+                Write-Host "  Oldest Record in Log: $oldestInLog ($([math]::Round($daysInLog, 1)) days ago)" -ForegroundColor Yellow
+                
+                if ($oldestInLog -lt $oldestEvent) {
+                    Write-Host "  NOTE: Log contains older records, but boot/shutdown events only go back to $oldestEvent" -ForegroundColor Yellow
                 }
             }
+            
+            Write-Host ""
+            Write-Host "Why data is limited:" -ForegroundColor Cyan
+            Write-Host "  - Windows Event Logs use a CIRCULAR BUFFER (default)" -ForegroundColor White
+            Write-Host "  - When the log reaches maximum size, OLDEST events are DELETED" -ForegroundColor White
+            Write-Host "  - This is a Windows RESTRICTION, not a file size issue" -ForegroundColor White
+            Write-Host "  - Typical retention: 1 year or less depending on system activity" -ForegroundColor White
+            Write-Host "  - To keep more history, you'd need to:" -ForegroundColor White
+            Write-Host "    1. Increase log size (Event Viewer > System Log > Properties)" -ForegroundColor Gray
+            Write-Host "    2. Change retention to 'Archive when full' (may impact performance)" -ForegroundColor Gray
+            Write-Host "    3. Use Windows Event Forwarding to archive events externally" -ForegroundColor Gray
         }
     } catch {
         # Ignore errors getting log info
@@ -162,7 +185,13 @@ try {
     if ($days -gt $availableDays) {
         Write-Host "WARNING: Requested $days days, but only $([math]::Round($availableDays, 1)) days of boot/shutdown data available." -ForegroundColor Yellow
         Write-Host "Available data range: $oldestEvent to $newestEvent" -ForegroundColor Yellow
-        Write-Host "This is likely due to Windows Event Log retention policy (typically 1 year or less)." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "This is a WINDOWS RESTRICTION, not a file size limitation:" -ForegroundColor Yellow
+        Write-Host "  - Windows Event Logs use a circular buffer that overwrites old events" -ForegroundColor White
+        Write-Host "  - When the log fills up, Windows automatically deletes the oldest events" -ForegroundColor White
+        Write-Host "  - This is by design to prevent logs from consuming unlimited disk space" -ForegroundColor White
+        Write-Host "  - Typical retention: 1 year or less depending on system activity" -ForegroundColor White
+        Write-Host ""
         Write-Host "Analysis will be limited to available data." -ForegroundColor Yellow
         Write-Host ""
     }
