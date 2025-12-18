@@ -1,8 +1,63 @@
-$endDate = Get-Date
-$startDate = $endDate.AddDays(-365)
+# Function to get time frame from user
+function Get-TimeFrame {
+    Write-Host ""
+    Write-Host "=========================================="
+    Write-Host "System Uptime Calculator"
+    Write-Host "=========================================="
+    Write-Host ""
+    Write-Host "Select time frame for analysis:"
+    Write-Host "  1. Last 7 days"
+    Write-Host "  2. Last 30 days"
+    Write-Host "  3. Last 90 days"
+    Write-Host "  4. Last 180 days"
+    Write-Host "  5. Last 365 days (1 year) [DEFAULT]"
+    Write-Host "  6. Custom number of days"
+    Write-Host ""
+    
+    $choice = Read-Host "Enter your choice (1-6, or press Enter for default 1 year)"
+    
+    # Default to 365 days if Enter is pressed
+    if ([string]::IsNullOrWhiteSpace($choice)) {
+        $days = 365
+        Write-Host "Using default: 365 days (1 year)" -ForegroundColor Green
+        return $days
+    }
+    
+    switch ($choice) {
+        "1" { return 7 }
+        "2" { return 30 }
+        "3" { return 90 }
+        "4" { return 180 }
+        "5" { return 365 }
+        "6" {
+            while ($true) {
+                $customDays = Read-Host "Enter number of days (1-3650)"
+                if ($customDays -match '^\d+$' -and [int]$customDays -ge 1 -and [int]$customDays -le 3650) {
+                    return [int]$customDays
+                } else {
+                    Write-Host "Invalid input. Please enter a number between 1 and 3650." -ForegroundColor Red
+                }
+            }
+        }
+        default {
+            Write-Host "Invalid choice. Using default: 365 days (1 year)" -ForegroundColor Yellow
+            return 365
+        }
+    }
+}
 
+# Get time frame from user
+$days = Get-TimeFrame
+$endDate = Get-Date
+$startDate = $endDate.AddDays(-$days)
+
+Write-Host ""
 Write-Host "=========================================="
-Write-Host "System Uptime Analysis (Last 365 Days)"
+if ($days -eq 365) {
+    Write-Host "System Uptime Analysis (Last 365 Days / 1 Year)"
+} else {
+    Write-Host "System Uptime Analysis (Last $days Days)"
+}
 Write-Host "=========================================="
 Write-Host "Analysis Period: $startDate to $endDate"
 Write-Host ""
@@ -51,7 +106,7 @@ foreach ($block in $eventBlocks) {
 }
 
 if ($events.Count -eq 0) {
-    Write-Host "No boot/shutdown events found in the last 365 days."
+    Write-Host "No boot/shutdown events found in the last $days days."
     Write-Host "Checking current session uptime..."
     $lastBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
     $currentUptime = (Get-Date) - $lastBoot
@@ -66,7 +121,7 @@ if ($events.Count -eq 0) {
 # Sort events by time
 $sortedEvents = $events | Sort-Object TimeCreated
 
-Write-Host "Found $($sortedEvents.Count) boot/shutdown events in the last 365 days"
+Write-Host "Found $($sortedEvents.Count) boot/shutdown events in the last $days days"
 Write-Host ""
 
 # Calculate total uptime
@@ -117,7 +172,7 @@ Write-Host "  Minutes: $($totalUptime.Minutes)"
 Write-Host "  Total Hours: $([math]::Round($totalUptime.TotalHours, 2))"
 Write-Host "  Total Days: $([math]::Round($totalUptime.TotalDays, 2))"
 Write-Host ""
-Write-Host "Uptime Percentage: $([math]::Round(($totalUptime.TotalDays / 365) * 100, 2))%"
+Write-Host "Uptime Percentage: $([math]::Round(($totalUptime.TotalDays / $days) * 100, 2))%"
 Write-Host "=========================================="
 Write-Host ""
 Write-Host "Press any key to exit..."
