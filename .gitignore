@@ -1,0 +1,15 @@
+# Windows Event Log files
+events.txt
+*.txt
+
+# PowerShell temporary files
+*.ps1~.tmp
+
+# User-specific files
+*.user
+*.suo
+
+# OS files
+.DS_Store
+Thumbs.db
+
